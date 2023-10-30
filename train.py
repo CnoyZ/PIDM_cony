@@ -18,6 +18,8 @@ import numpy as np
 import data as deepfashion_data
 from model import UNet
 
+#zzx!
+
 def init_distributed():
 
     # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
