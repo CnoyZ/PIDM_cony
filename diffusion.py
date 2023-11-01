@@ -17,6 +17,10 @@ from types import *
 import torch
 import tqdm
 
+import pickle
+import torch.nn.functional as F
+import cv2
+
 def compute_alpha(beta, t):
     beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
     a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
@@ -943,8 +947,32 @@ class GaussianDiffusion:
         # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
+    """
+    Functions for competing the facial identity similarity.
+    """
+    def findCosineDistance(self, source_representation, test_representation):
+      a = np.matmul(np.transpose(source_representation), test_representation)
+      b = np.sum(np.multiply(source_representation, source_representation))
+      c = np.sum(np.multiply(test_representation, test_representation))
+      return 1 - (a / (np.sqrt(b) * np.sqrt(c)))
+    
+    def id_similarity(self, target, output, model_face):
+      face_output = model_face.get(output)
+      face_target = model_face.get(target)
+      if len(face_target) == 0:
+        if len(face_output) == 0:
+          return 0.0
+        else:
+          return 1.0
+      elif len(face_output) == 0:
+        return 1.0
+      else:
+        face_output_embedding = face_output[0].embedding
+        face_target_embedding = face_target[0].embedding
+        cosdistance = self.findCosineDistance(face_output_embedding, face_target_embedding)
+        return cosdistance
 
-    def training_losses(self, model, x_start, cond_input, t, prob, model_kwargs=None, noise=None):
+    def training_losses(self, model, x_start, cond_input, t, prob, model_kwargs=None, noise=None, model_face=None):
         """
         Compute training losses for a single timestep.
         :param model: the model to evaluate loss on.
@@ -961,6 +989,10 @@ class GaussianDiffusion:
         if noise is None:
             noise = th.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise=noise)
+
+        # f=open('x_start.txt','wb')
+        # pickle.dump(x_start,f)
+        # f.close()
 
         [img, target_pose] = cond_input
 
@@ -992,13 +1024,37 @@ class GaussianDiffusion:
                 # Learn the variance using the variational bound, but don't let
                 # it affect our mean prediction.
                 frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
-                terms["vb"] = self._vb_terms_bpd(
+                out = self._vb_terms_bpd(
                     model=lambda *args, r=frozen_out: r,
                     x_start=x_start,
                     x_t=x_t,
                     t=t,
                     clip_denoised=False,
-                )["output"]
+                )
+
+                terms["vb"] = out["output"]
+                pred = out["pred_xstart"]
+
+                temp_face = []
+                for zzx in range(len(x_start)):
+                  targ_img = np.squeeze(x_start[zzx].cpu().detach().numpy())
+                  targ_img = np.transpose(targ_img, (1, 2, 0))
+                  targ_img = cv2.cvtColor(targ_img*255, cv2.COLOR_RGB2BGR)
+                  pred_img = np.squeeze(pred[zzx].cpu().detach().numpy())
+                  pred_img = np.transpose(pred_img, (1, 2, 0))
+                  pred_img = cv2.cvtColor(pred_img*255, cv2.COLOR_RGB2BGR)
+
+                  temp_face.append(self.id_similarity(targ_img, pred_img, model_face))
+
+                terms["face"] = torch.tensor(temp_face, device='cuda:0', requires_grad=True)
+                # f=open('pred.txt','wb')
+                # pickle.dump(pred,f)
+                # f.close()
+              
+                # f=open('terms_vb.txt','wb')
+                # pickle.dump(terms["vb"],f)
+                # f.close()
+
                 if self.loss_type == LossType.RESCALED_MSE:
                     # Divide by 1000 for equivalence with initial implementation.
                     # Without a factor of 1/1000, the VB term hurts the MSE term.
@@ -1011,12 +1067,21 @@ class GaussianDiffusion:
                 ModelMeanType.START_X: x_start,
                 ModelMeanType.EPSILON: noise,
             }[self.model_mean_type]
+
             assert model_output.shape == target.shape == x_start.shape
             terms["mse"] = mean_flat((target - model_output) ** 2)
+
+            # f=open('terms_mse.txt','wb')
+            # pickle.dump(terms["mse"],f)
+            # f.close()
+
+            #terms["face"] = 0
+            terms["face"] = terms["face"] * 0.005
+
             if "vb" in terms:
-                terms["loss"] = terms["mse"] + terms["vb"]
+                terms["loss"] = terms["mse"] + terms["vb"] + terms["face"]
             else:
-                terms["loss"] = terms["mse"]
+                terms["loss"] = terms["mse"] + terms["face"]
         else:
             raise NotImplementedError(self.loss_type)
 
