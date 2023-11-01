@@ -17,6 +17,8 @@ from tqdm import tqdm
 import numpy as np
 import data as deepfashion_data
 from model import UNet
+from insightface.app import FaceAnalysis
+
 
 #zzx!
 
@@ -90,7 +92,7 @@ def accumulate(model1, model2, decay=0.9999):
 
 
 
-def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, scheduler, guidance_prob, cond_scale, device, wandb):
+def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, scheduler, guidance_prob, cond_scale, device, wandb, app_analysis):
 
     import time
 
@@ -99,6 +101,7 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
     loss_list = []
     loss_mean_list = []
     loss_vb_list = []
+    loss_face_list = []
  
     for epoch in range(300):
 
@@ -124,11 +127,12 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
                 device=device,
             )
 
-            loss_dict = diffusion.training_losses(model, x_start = target_img, t = time_t, cond_input = [img, target_pose], prob = 1 - guidance_prob)
+            loss_dict = diffusion.training_losses(model, x_start = target_img, t = time_t, cond_input = [img, target_pose], prob = 1 - guidance_prob, model_face = app_analysis)
             
             loss = loss_dict['loss'].mean()
             loss_mse = loss_dict['mse'].mean()
             loss_vb = loss_dict['vb'].mean()
+            loss_face = loss_dict['face'].mean()
         
 
             optimizer.zero_grad()
@@ -141,22 +145,60 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
             loss_list.append(loss.detach().item())
             loss_mean_list.append(loss_mse.detach().item())
             loss_vb_list.append(loss_vb.detach().item())
+            loss_face_list.append(loss_face.detach().item())
 
             accumulate(
                 ema, model.module, 0 if i < conf.training.scheduler.warmup else 0.9999
             )
 
+            # add early stopping
+            if args.early_stop:
+              if args.loss_best is None:
+                args.loss_best = loss
+              elif loss >= args.loss_best:
+                args.loss_counter += 1
+                if args.loss_counter >= args.loss_patience:
+                  print('\n')
+                  print("EarlyStopping: Stop training at iteration {}".format(i))
+
+                  torch.save(best_model, best_model_path)
+
+                  wandb.log(best_losses)
+                  
+                  args.stop_training = True
+                  break
+              else:
+                args.loss_best = loss
+                args.loss_counter = 0
+                if conf.distributed:
+                    model_module = model.module
+                else:
+                    model_module = model
+                best_model = {
+                          "model": model_module.state_dict(),
+                          "ema": ema.state_dict(),
+                          "scheduler": scheduler.state_dict(),
+                          "optimizer": optimizer.state_dict(),
+                          "conf": conf,
+                        }
+                best_model_path = conf.training.ckpt_path + f"/model_{str(i).zfill(6)}.pt"
+                best_losses = {'loss':(loss.detach().item()), 
+                              'loss_vb':(loss_vb.detach().item()), 
+                              'loss_mean':(loss_mse.detach().item()),
+                              'loss_id':(loss_face.detach().item()), 
+                              'epoch':epoch,'steps':i}
 
             if i%args.save_wandb_logs_every_iters == 0 and is_main_process():
 
                 wandb.log({'loss':(sum(loss_list)/len(loss_list)), 
                             'loss_vb':(sum(loss_vb_list)/len(loss_vb_list)), 
-                            'loss_mean':(sum(loss_mean_list)/len(loss_mean_list)), 
+                            'loss_mean':(sum(loss_mean_list)/len(loss_mean_list)),
+                            'loss_id':(sum(loss_face_list)/len(loss_face_list)), 
                             'epoch':epoch,'steps':i})
                 loss_list = []
                 loss_mean_list = []
                 loss_vb_list = []
-
+                loss_face_list = []
 
             if i%args.save_checkpoints_every_iters == 0 and is_main_process():
 
@@ -176,6 +218,9 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
                     },
                     conf.training.ckpt_path + f"/model_{str(i).zfill(6)}.pt"
                 )
+
+        if args.stop_training:
+          break
 
         if is_main_process():
 
@@ -234,7 +279,7 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
 
 
 
-def main(settings, EXP_NAME):
+def main(settings, EXP_NAME, app_analysis):
 
     [args, DiffConf, DataConf] = settings
 
@@ -290,7 +335,7 @@ def main(settings, EXP_NAME):
     diffusion = create_gaussian_diffusion(betas, predict_xstart = False)
 
     train(
-        DiffConf, train_dataset, val_dataset, model, ema, diffusion, betas, optimizer, scheduler, args.guidance_prob, args.cond_scale, args.device, wandb
+        DiffConf, train_dataset, val_dataset, model, ema, diffusion, betas, optimizer, scheduler, args.guidance_prob, args.cond_scale, args.device, wandb, app_analysis
     )
 
 if __name__ == "__main__":
@@ -317,6 +362,12 @@ if __name__ == "__main__":
     parser.add_argument('--n_machine', type=int, default=1)
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
+    # zzx!
+    parser.add_argument('--early_stop', default=False, type=bool)
+    parser.add_argument('--loss_patience', default=10, type=int, help='Patience to help judge early stop')
+    parser.add_argument('--loss_best',default=None, type=float, help='Save the best value of loss')
+    parser.add_argument('--loss_counter', default=0, type=int, help='Count to help judge early stop')
+    parser.add_argument('--stop_training', default=False, type=bool, help='Stop training or not')
 
     args = parser.parse_args()
 
@@ -333,6 +384,9 @@ if __name__ == "__main__":
         if not os.path.isdir(args.save_path): os.mkdir(args.save_path)
         if not os.path.isdir(DiffConf.training.ckpt_path): os.mkdir(DiffConf.training.ckpt_path)
 
-    #DiffConf.ckpt = "checkpoints/last.pt"
+    DiffConf.ckpt = "checkpoints/last.pt"
 
-    main(settings = [args, DiffConf, DataConf], EXP_NAME = args.exp_name)
+    app_analysis = FaceAnalysis(providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    app_analysis.prepare(ctx_id=0, det_size=(640, 640))
+
+    main(settings = [args, DiffConf, DataConf], EXP_NAME = args.exp_name, app_analysis = app_analysis)
