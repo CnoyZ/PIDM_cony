@@ -10,7 +10,7 @@ from tensorfn.config import (
 )
 
 import diffusion
-import PIDM.model
+import PIDM_cony.model
 from models.unet_autoenc import BeatGANsAutoencConfig
 
 
