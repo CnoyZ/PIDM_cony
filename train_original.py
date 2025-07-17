@@ -8,7 +8,7 @@ import torch.distributed as dist
 from config.diffconfig import DiffusionConfig, get_model_conf
 from config.dataconfig import Config as DataConfig
 from tensorfn import load_config as DiffConfig
-from diffusion import create_gaussian_diffusion, make_beta_schedule, ddim_steps
+from diffusion_original import create_gaussian_diffusion, make_beta_schedule, ddim_steps
 from tensorfn.optim import lr_scheduler
 from torch import nn, optim
 from torch.utils import data
