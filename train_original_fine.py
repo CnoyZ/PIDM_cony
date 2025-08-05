@@ -17,6 +17,7 @@ from tqdm import tqdm
 import numpy as np
 import data as deepfashion_data
 from model import UNet
+import torchvision.utils as vutils  # 放在文件头部导入
 
 def init_distributed():
 
@@ -97,8 +98,13 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
     loss_list = []
     loss_mean_list = []
     loss_vb_list = []
- 
-    for epoch in range(300):
+     # ========== Early stopping 参数 ==========
+    best_loss = float('inf')
+    patience = 10
+    patience_counter = 0
+    max_epoch = 50
+
+    for epoch in range(max_epoch):
 
         if is_main_process: print ('#Epoch - '+str(epoch))
 
@@ -132,7 +138,7 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1)
-            scheduler.step()
+            # scheduler.step()
             optimizer.step()
             loss = loss_dict['loss'].mean()
 
@@ -141,7 +147,7 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
             loss_vb_list.append(loss_vb.detach().item())
 
             accumulate(
-                ema, model.module, 0 if i < conf.training.scheduler.warmup else 0.9999
+                ema, model.module, 0 if i < 0 else 0.9999
             )
 
 
@@ -151,6 +157,7 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
                             'loss_vb':(sum(loss_vb_list)/len(loss_vb_list)), 
                             'loss_mean':(sum(loss_mean_list)/len(loss_mean_list)), 
                             'epoch':epoch,'steps':i})
+                epoch_loss = np.mean(loss_list) if len(loss_list) > 0 else float('inf')
                 loss_list = []
                 loss_mean_list = []
                 loss_vb_list = []
@@ -168,38 +175,91 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
                     {
                         "model": model_module.state_dict(),
                         "ema": ema.state_dict(),
-                        "scheduler": scheduler.state_dict(),
+                        # "scheduler": scheduler.state_dict(),
                         "optimizer": optimizer.state_dict(),
                         "conf": conf,
                     },
                     conf.training.ckpt_path + f"/model_{str(i).zfill(6)}.pt"
                 )
 
-        if is_main_process():
+        # if is_main_process():
 
-            print ('Epoch Time '+str(int(time.time()-start_time))+' secs')
-            print ('Model Saved Successfully for #epoch '+str(epoch)+' #steps '+str(i))
+        #     print ('Epoch Time '+str(int(time.time()-start_time))+' secs')
+        #     print ('Model Saved Successfully for #epoch '+str(epoch)+' #steps '+str(i))
 
-            if conf.distributed:
-                model_module = model.module
+        #     if conf.distributed:
+        #         model_module = model.module
 
-            else:
-                model_module = model
+        #     else:
+        #         model_module = model
 
-            torch.save(
-                {
-                    "model": model_module.state_dict(),
-                    "ema": ema.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "conf": conf,
-                },
-                conf.training.ckpt_path + '/last.pt'
+        #     torch.save(
+        #         {
+        #             "model": model_module.state_dict(),
+        #             "ema": ema.state_dict(),
+        #             # "scheduler": scheduler.state_dict(),
+        #             "optimizer": optimizer.state_dict(),
+        #             "conf": conf,
+        #         },
+        #         conf.training.ckpt_path + '/last.pt'
                
-            )
+        #     )
 
-        if (epoch)%args.save_wandb_images_every_epochs==0:
+        # # if (epoch)%args.save_wandb_images_every_epochs==0:
+        # if epoch==0:
 
+        #     print ('Generating samples at epoch number ' + str(epoch))
+
+        #     val_batch = next(val_loader)
+        #     val_img = val_batch['source_image'].cuda()
+        #     val_pose = val_batch['target_skeleton'].cuda()
+
+        #     with torch.no_grad():
+
+        #         if args.sample_algorithm == 'ddpm':
+        #             print ('Sampling algorithm used: DDPM')
+        #             samples = diffusion.p_sample_loop(ema, x_cond = [val_img, val_pose], progress = True, cond_scale = cond_scale)
+        #         elif args.sample_algorithm == 'ddim':
+        #             print ('Sampling algorithm used: DDIM')
+        #             nsteps = 50
+        #             noise = torch.randn(val_img.shape).cuda()
+        #             seq = range(0, 1000, 1000//nsteps)
+        #             xs, x0_preds = ddim_steps(noise, seq, ema, betas.cuda(), [val_img, val_pose])
+        #             samples = xs[-1].cuda()
+
+
+        #     grid = torch.cat([val_img, val_pose[:,:3], samples], -1)
+            
+        #     gathered_samples = [torch.zeros_like(grid) for _ in range(dist.get_world_size())]
+        #     dist.all_gather(gathered_samples, grid) 
+
+        #     # 拼接所有GPU收集到的图像
+        #     gathered_samples_tensor = torch.cat(gathered_samples, dim=0)  # [B, C, H, W]
+        #     # 保存为samples.png（每行最多8张图，可根据需要修改nrow）
+        #     vutils.save_image(gathered_samples_tensor, "samples.png", nrow=8, normalize=True, scale_each=True)
+        #     print("Saved samples to samples.png")
+            
+        #     # if is_main_process():
+                
+        #     #     wandb.log({'samples':wandb.Image(torch.cat(gathered_samples, -2))})
+        #     if is_main_process():
+        #         all_samples = torch.cat(gathered_samples, dim=0)  # [N, C, H, W]
+        #         grid_img = vutils.make_grid(all_samples, nrow=8, normalize=True, scale_each=True)
+        #         wandb.log({'samples': wandb.Image(grid_img)})
+
+        # 记录当前 epoch 用时
+        if is_main_process():
+            print('Epoch Time ' + str(int(time.time() - start_time)) + ' secs')
+            print('Model Saved Successfully for #epoch ' + str(epoch) + ' #steps ' + str(i))
+
+        # ========== Early stopping 判断 ==========
+        # epoch_loss = np.mean(loss_list) if len(loss_list) > 0 else float('inf')
+        stop_training = False
+
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            patience_counter = 0
+            save_as_best = True
             print ('Generating samples at epoch number ' + str(epoch))
 
             val_batch = next(val_loader)
@@ -224,27 +284,79 @@ def train(conf, loader, val_loader, model, ema, diffusion, betas, optimizer, sch
             
             gathered_samples = [torch.zeros_like(grid) for _ in range(dist.get_world_size())]
             dist.all_gather(gathered_samples, grid) 
+
+            # 拼接所有GPU收集到的图像
+            gathered_samples_tensor = torch.cat(gathered_samples, dim=0)  # [B, C, H, W]
+            # 保存为samples.png（每行最多8张图，可根据需要修改nrow）
+            vutils.save_image(gathered_samples_tensor, "samples.png", nrow=8, normalize=True, scale_each=True)
+            print("Saved samples to samples.png")
             
-
-            if is_main_process():
+            # if is_main_process():
                 
-                wandb.log({'samples':wandb.Image(torch.cat(gathered_samples, -2))})
+            #     wandb.log({'samples':wandb.Image(torch.cat(gathered_samples, -2))})
+            if is_main_process():
+                all_samples = torch.cat(gathered_samples, dim=0)  # [N, C, H, W]
+                grid_img = vutils.make_grid(all_samples, nrow=24, normalize=True, scale_each=True)
+                wandb.log({'samples': wandb.Image(grid_img)})
+        else:
+            patience_counter += 1
+            save_as_best = False
 
+        if is_main_process():
+            print(f"→ Epoch loss: {epoch_loss:.6f} | Best: {best_loss:.6f} | Patience: {patience_counter}/{patience}")
+            if patience_counter >= patience:
+                print(f"🛑 Early stopping triggered at epoch {epoch}")
+                stop_training = True
+
+        # 保存模型（只主进程执行）
+        if is_main_process():
+            model_module = model.module if conf.distributed else model
+            save_name = "/best.pt" if save_as_best else "/last.pt"
+
+            torch.save(
+                {
+                    "model": model_module.state_dict(),
+                    "ema": ema.state_dict(),
+                    # "scheduler": scheduler.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "conf": conf,
+                },
+                conf.training.ckpt_path + save_name
+            )
+
+        # 如果早停标志为 True，则 break（多卡同步）
+        if stop_training:
+            break
+
+
+# def freeze_all_except_content_path(model):
+#     # 冻结所有参数
+#     for p in model.parameters():
+#         p.requires_grad = False
+
+#     # 解冻图像 encoder（model.down）
+#     for p in model.down.parameters():
+#         p.requires_grad = True
+
+#     # 解冻图像 decoder（model.up 中用于解码 skip feature 的 ResBlock）
+#     for layer in model.up:
+#         if isinstance(layer, nn.Module):  # 避免误操作非模块层
+#             if layer.__class__.__name__ == "ResBlockWithAttention":
+#                 for p in layer.parameters():
+#                     p.requires_grad = True
 def freeze_all_except_content_path(model):
     # 冻结所有参数
     for p in model.parameters():
         p.requires_grad = False
 
-    # 解冻图像 encoder（model.down）
-    for p in model.down.parameters():
+    # ✅ 解冻 encoder（提取 source image 的风格）
+    for p in model.encoder.parameters():
         p.requires_grad = True
 
-    # 解冻图像 decoder（model.up 中用于解码 skip feature 的 ResBlock）
-    for layer in model.up:
-        if isinstance(layer, nn.Module):  # 避免误操作非模块层
-            if layer.__class__.__name__ == "ResBlockWithAttention":
-                for p in layer.parameters():
-                    p.requires_grad = True
+    # ✅ 可选：解冻 time_embed.style（目前是 Identity）
+    if hasattr(model.time_embed, 'style'):
+        for p in model.time_embed.style.parameters():
+            p.requires_grad = True
 
 def main(settings, EXP_NAME):
 
@@ -252,8 +364,8 @@ def main(settings, EXP_NAME):
 
     if is_main_process(): wandb.init(project="person-synthesis", name = EXP_NAME,  settings = wandb.Settings(code_dir="."))
 
-    if DiffConf.ckpt is not None: 
-        DiffConf.training.scheduler.warmup = 0
+    # if DiffConf.ckpt is not None: 
+    #     DiffConf.training.scheduler.warmup = 0
 
     DiffConf.distributed = True
     local_rank = int(os.environ['LOCAL_RANK'])
@@ -274,7 +386,6 @@ def main(settings, EXP_NAME):
     ema = get_model_conf().make_model()
     ema = ema.to(args.device)
 
-    # 🔥 仅解冻图像内容 encoder + decoder
     freeze_all_except_content_path(model)
 
     if DiffConf.distributed:
@@ -286,10 +397,10 @@ def main(settings, EXP_NAME):
 
     # optimizer = DiffConf.training.optimizer.make(model.parameters())
     optimizer = DiffConf.training.optimizer.make(filter(lambda p: p.requires_grad, model.parameters()))
-    scheduler = DiffConf.training.scheduler.make(optimizer)
+    # scheduler = DiffConf.training.scheduler.make(optimizer)
 
     if DiffConf.ckpt is not None:
-        ckpt = torch.load(DiffConf.ckpt, map_location=lambda storage, loc: storage)
+        ckpt = torch.load(DiffConf.ckpt, map_location=lambda storage, loc: storage, weights_only=False)
 
         if DiffConf.distributed:
             model.module.load_state_dict(ckpt["model"])
@@ -298,7 +409,7 @@ def main(settings, EXP_NAME):
             model.load_state_dict(ckpt["model"])
 
         ema.load_state_dict(ckpt["ema"])
-        scheduler.load_state_dict(ckpt["scheduler"])
+        # scheduler.load_state_dict(ckpt["scheduler"])
 
         if is_main_process():  print ('model loaded successfully')
 
@@ -306,7 +417,7 @@ def main(settings, EXP_NAME):
     diffusion = create_gaussian_diffusion(betas, predict_xstart = False)
 
     train(
-        DiffConf, train_dataset, val_dataset, model, ema, diffusion, betas, optimizer, scheduler, args.guidance_prob, args.cond_scale, args.device, wandb
+        DiffConf, train_dataset, val_dataset, model, ema, diffusion, betas, optimizer, None, args.guidance_prob, args.cond_scale, args.device, wandb
     )
 
 if __name__ == "__main__":
@@ -325,7 +436,7 @@ if __name__ == "__main__":
     parser.add_argument('--guidance_prob', type=int, default=0.1)
     parser.add_argument('--sample_algorithm', type=str, default='ddim') # ddpm, ddim
     parser.add_argument('--batch_size', type=int, default=2)
-    parser.add_argument('--save_wandb_logs_every_iters', type=int, default=50)
+    parser.add_argument('--save_wandb_logs_every_iters', type=int, default=12)
     parser.add_argument('--save_checkpoints_every_iters', type=int, default=2000)
     parser.add_argument('--save_wandb_images_every_epochs', type=int, default=10)
     parser.add_argument('--device', type=str, default='cuda')
@@ -349,6 +460,6 @@ if __name__ == "__main__":
         if not os.path.isdir(args.save_path): os.mkdir(args.save_path)
         if not os.path.isdir(DiffConf.training.ckpt_path): os.mkdir(DiffConf.training.ckpt_path)
 
-    #DiffConf.ckpt = "checkpoints/last.pt"
+    DiffConf.ckpt = "checkpoints/last.pt"
 
     main(settings = [args, DiffConf, DataConf], EXP_NAME = args.exp_name)
