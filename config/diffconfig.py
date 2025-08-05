@@ -10,7 +10,7 @@ from tensorfn.config import (
 )
 
 import diffusion
-import PIDM_cony.model
+import model
 from models.unet_autoenc import BeatGANsAutoencConfig
 
 
@@ -75,3 +75,4 @@ def get_model_conf():
     enc_channel_mult=(1, 1, 2, 2, 4, 4, 4), 
     enc_grad_checkpoint=False, 
     latent_net_conf=None)
+
